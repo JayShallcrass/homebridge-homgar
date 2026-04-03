@@ -46,14 +46,14 @@
         "maximum": 3600,
         "description": "Default duration when starting watering from HomeKit (10 minutes default)"
       },
-      "scheduling": {
-        "title": "Smart Irrigation Scheduler",
+      "weather": {
+        "title": "Weather Sensors",
         "type": "object",
         "expandable": true,
-        "description": "Weather-aware automatic watering using Open-Meteo (free, no API key needed)",
+        "description": "Expose weather data as HomeKit sensors using Open-Meteo (free, no API key needed). Use the 'Should Water' sensor to trigger automations.",
         "properties": {
           "enabled": {
-            "title": "Enable Smart Scheduling",
+            "title": "Enable Weather Sensors",
             "type": "boolean",
             "default": false
           },
@@ -67,73 +67,30 @@
             "type": "number",
             "description": "Your location longitude for weather data"
           },
-          "wateringTime": {
-            "title": "Watering Time",
-            "type": "string",
-            "default": "07:00",
-            "description": "Daily watering check time in 24h format (HH:MM)"
-          },
-          "zones": {
-            "title": "Scheduled Zones",
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "zone": {
-                  "title": "Zone Number",
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "duration": {
-                  "title": "Duration (seconds)",
-                  "type": "integer",
-                  "default": 1200,
-                  "minimum": 60,
-                  "maximum": 3600
-                },
-                "enabled": {
-                  "title": "Enabled",
-                  "type": "boolean",
-                  "default": true
-                }
-              }
-            }
-          },
-          "sequential": {
-            "title": "Run Zones Sequentially",
-            "type": "boolean",
-            "default": true,
-            "description": "Run zones one after another (required if water pressure only supports one zone at a time)"
-          },
-          "pauseZones": {
-            "title": "Pause Zones During Watering",
-            "type": "array",
-            "items": { "type": "integer" },
-            "description": "Zone numbers to temporarily close during scheduled watering (e.g. motion-activated deterrent zones)"
+          "pollInterval": {
+            "title": "Weather Poll Interval (minutes)",
+            "type": "integer",
+            "default": 30,
+            "minimum": 10,
+            "description": "How often to fetch weather data"
           },
           "rainSkipThreshold": {
             "title": "Rain Skip Threshold (mm)",
             "type": "number",
             "default": 10,
-            "description": "Skip watering if this much rain fell in the last 48 hours"
-          },
-          "rainReduceThreshold": {
-            "title": "Rain Reduce Threshold (mm)",
-            "type": "number",
-            "default": 5,
-            "description": "Reduce watering duration by 50% if this much rain fell in the last 48 hours"
+            "description": "'Should Water' turns off if this much rain fell in the last 48 hours"
           },
           "forecastSkipThreshold": {
             "title": "Forecast Skip Threshold (mm)",
             "type": "number",
             "default": 5,
-            "description": "Skip watering if this much rain is forecast in the next 24 hours"
+            "description": "'Should Water' turns off if this much rain is forecast in the next 24 hours"
           },
           "seasonalAdjust": {
             "title": "Seasonal Adjustment",
             "type": "boolean",
             "default": true,
-            "description": "Automatically reduce watering in spring/autumn and skip in winter"
+            "description": "'Should Water' turns off automatically in winter (Dec-Feb)"
           }
         }
       }

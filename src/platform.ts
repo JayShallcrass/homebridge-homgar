@@ -11,7 +11,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { HomGarApiClient } from './api/client';
 import { HomGarConfig, HomGarHub, HomGarSubDevice } from './api/types';
 import { WaterTimerAccessory } from './accessories/waterTimer';
-import { IrrigationScheduler } from './scheduler';
+import { WeatherSensorAccessory } from './accessories/weatherSensor';
 
 export class HomGarPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -21,7 +21,7 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
   private readonly accessories: PlatformAccessory[] = [];
   private readonly activeAccessories: Map<string, WaterTimerAccessory> = new Map();
   private client: HomGarApiClient | null = null;
-  private scheduler: IrrigationScheduler | null = null;
+  private weatherSensor: WeatherSensorAccessory | null = null;
 
   constructor(
     public readonly log: Logger,
@@ -76,10 +76,7 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
           for (const subDevice of hub.subDevices) {
             this.log.info(`  Sub-device: ${subDevice.name} (${subDevice.model}, addr: ${subDevice.addr})`);
 
-            // For now, only create accessories for valve/timer devices
-            // Sensor support can be added later
             if (this.isTimerDevice(subDevice)) {
-              // Use portNumber from API, fall back to model-based detection
               const zoneCount = subDevice.portNumber || this.getZoneCount(subDevice);
               const portNames = subDevice.portDescribe?.split('|') || [];
 
@@ -115,35 +112,33 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
         }
       }
 
+      // Weather sensors
+      if (this.config.weather?.enabled) {
+        const weatherUuid = this.api.hap.uuid.generate('homgar-weather');
+        discoveredUuids.push(weatherUuid);
+
+        const existingWeather = this.accessories.find(a => a.UUID === weatherUuid);
+
+        if (existingWeather) {
+          this.log.info('Restoring weather sensor from cache');
+          this.weatherSensor = new WeatherSensorAccessory(
+            this, existingWeather, this.config.weather, this.log,
+          );
+        } else {
+          this.log.info('Adding weather sensor accessory');
+          const weatherAccessory = new this.api.platformAccessory('Garden Weather', weatherUuid);
+          this.weatherSensor = new WeatherSensorAccessory(
+            this, weatherAccessory, this.config.weather, this.log,
+          );
+          this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [weatherAccessory]);
+        }
+      }
+
       // Remove stale accessories
       for (const accessory of this.accessories) {
         if (!discoveredUuids.includes(accessory.UUID)) {
           this.log.info('Removing stale accessory:', accessory.displayName);
           this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-        }
-      }
-
-      // Start smart irrigation scheduler if configured
-      if (this.config.scheduling?.enabled && this.client) {
-        // Find the first timer device to attach the scheduler to
-        for (const home of homes) {
-          const homeHubs = await this.client.getDevices(home.hid);
-          for (const hub of homeHubs) {
-            for (const subDevice of hub.subDevices) {
-              if (this.isTimerDevice(subDevice)) {
-                this.scheduler = new IrrigationScheduler(
-                  this.config.scheduling,
-                  this.client,
-                  hub,
-                  subDevice,
-                  this.log,
-                );
-                break;
-              }
-            }
-            if (this.scheduler) break;
-          }
-          if (this.scheduler) break;
         }
       }
     } catch (error) {
@@ -188,7 +183,6 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
     if (timerModels.some(m => device.model.toUpperCase().includes(m.toUpperCase()))) {
       return true;
     }
-    // Also check model codes for known valve types
     const timerModelCodes = [261, 263, 266, 267, 272];
     return timerModelCodes.includes(device.modelCode);
   }
@@ -201,6 +195,6 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
     if (model.includes('HTV245FRF') || model.includes('HTV0540FRF')) {
       return 4;
     }
-    return 1; // Default single zone (WT-13W)
+    return 1;
   }
 }

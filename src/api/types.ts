@@ -1,17 +1,8 @@
-export interface ScheduleZoneConfig {
-  zone: number;
-  duration: number;
-  enabled: boolean;
-}
-
-export interface SchedulingConfig {
+export interface WeatherConfig {
   enabled: boolean;
   latitude: number;
   longitude: number;
-  wateringTime: string;
-  zones: ScheduleZoneConfig[];
-  sequential: boolean;
-  pauseZones?: number[];
+  pollInterval?: number;
   rainSkipThreshold?: number;
   rainReduceThreshold?: number;
   forecastSkipThreshold?: number;
@@ -26,7 +17,7 @@ export interface HomGarConfig {
   areaCode?: string;
   pollInterval?: number;
   defaultWateringDuration?: number;
-  scheduling?: SchedulingConfig;
+  weather?: WeatherConfig;
 }
 
 export interface HomGarHome {
