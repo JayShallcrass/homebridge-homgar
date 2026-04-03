@@ -11,6 +11,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { HomGarApiClient } from './api/client';
 import { HomGarConfig, HomGarHub, HomGarSubDevice } from './api/types';
 import { WaterTimerAccessory } from './accessories/waterTimer';
+import { IrrigationScheduler } from './scheduler';
 
 export class HomGarPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -20,6 +21,7 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
   private readonly accessories: PlatformAccessory[] = [];
   private readonly activeAccessories: Map<string, WaterTimerAccessory> = new Map();
   private client: HomGarApiClient | null = null;
+  private scheduler: IrrigationScheduler | null = null;
 
   constructor(
     public readonly log: Logger,
@@ -118,6 +120,30 @@ export class HomGarPlatform implements DynamicPlatformPlugin {
         if (!discoveredUuids.includes(accessory.UUID)) {
           this.log.info('Removing stale accessory:', accessory.displayName);
           this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+        }
+      }
+
+      // Start smart irrigation scheduler if configured
+      if (this.config.scheduling?.enabled && this.client) {
+        // Find the first timer device to attach the scheduler to
+        for (const home of homes) {
+          const homeHubs = await this.client.getDevices(home.hid);
+          for (const hub of homeHubs) {
+            for (const subDevice of hub.subDevices) {
+              if (this.isTimerDevice(subDevice)) {
+                this.scheduler = new IrrigationScheduler(
+                  this.config.scheduling,
+                  this.client,
+                  hub,
+                  subDevice,
+                  this.log,
+                );
+                break;
+              }
+            }
+            if (this.scheduler) break;
+          }
+          if (this.scheduler) break;
         }
       }
     } catch (error) {

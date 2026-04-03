@@ -1,6 +1,6 @@
 {
   "name": "homebridge-homgar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Homebridge plugin for HomGar, Diivoo, and RainPoint smart garden irrigation systems",
   "main": "dist/index.js",
   "files": [
