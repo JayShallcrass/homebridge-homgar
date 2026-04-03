@@ -1,0 +1,51 @@
+{
+  "pluginAlias": "HomGar",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Homebridge plugin for HomGar, Diivoo, and RainPoint smart garden irrigation systems.",
+  "footerDisplay": "Create a dedicated account in the HomGar/Diivoo app and share your home with it. Using your main account will cause the app to log out when the plugin authenticates.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "HomGar",
+        "required": true
+      },
+      "email": {
+        "title": "Email",
+        "type": "string",
+        "required": true,
+        "description": "Your HomGar/Diivoo account email (use a dedicated account, not your main one)"
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "required": true,
+        "description": "Your HomGar/Diivoo account password"
+      },
+      "areaCode": {
+        "title": "Country Code",
+        "type": "string",
+        "default": "44",
+        "description": "Phone country code for your account (44 for UK, 1 for US)"
+      },
+      "pollInterval": {
+        "title": "Poll Interval (seconds)",
+        "type": "integer",
+        "default": 120,
+        "minimum": 60,
+        "description": "How often to check device status (minimum 60 seconds)"
+      },
+      "defaultWateringDuration": {
+        "title": "Default Watering Duration (seconds)",
+        "type": "integer",
+        "default": 600,
+        "minimum": 60,
+        "maximum": 3600,
+        "description": "Default duration when starting watering from HomeKit (10 minutes default)"
+      }
+    }
+  }
+}
