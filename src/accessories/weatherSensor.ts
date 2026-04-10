@@ -8,22 +8,19 @@ import { HomGarPlatform } from '../platform';
 import { WeatherConfig } from '../api/types';
 
 interface WeatherData {
-  rainfall48h: number;
-  forecastNext24h: number;
-  temperature: number;
+  rainfall24h: number;       // mm
+  et0: number;               // mm (evapotranspiration)
+  forecastRain24h: number;   // mm
+  temperature: number;       // C
+  windSpeed: number;         // km/h
+  maxTempToday: number;      // C
 }
 
 export class WeatherSensorAccessory {
-  private rainfall48hService: Service;
-  private forecastService: Service;
   private shouldWaterService: Service;
-  private temperatureService: Service;
-
-  private rainfall48h = 0;
-  private forecastNext24h = 0;
-  private temperature = 15;
   private shouldWater = false;
-
+  private waterBalance = 0; // mm: positive = wet, negative = deficit
+  private lastBalanceUpdate: string | null = null; // YYYY-MM-DD of last daily update
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -35,39 +32,46 @@ export class WeatherSensorAccessory {
     const infoService = this.accessory.getService(this.platform.Service.AccessoryInformation)!;
     infoService
       .setCharacteristic(this.platform.Characteristic.Manufacturer, 'Open-Meteo')
-      .setCharacteristic(this.platform.Characteristic.Model, 'Weather Station')
+      .setCharacteristic(this.platform.Characteristic.Model, 'Smart Irrigation')
       .setCharacteristic(this.platform.Characteristic.SerialNumber, `${config.latitude},${config.longitude}`);
 
-    // Rainfall 48h as a HumiditySensor (0-100 scale, where value = mm rainfall, capped at 100)
-    this.rainfall48hService = this.accessory.getService('Rainfall 48h')
-      || this.accessory.addService(this.platform.Service.HumiditySensor, 'Rainfall 48h', 'rainfall48h');
-    this.rainfall48hService.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
-      .onGet(() => Math.min(this.rainfall48h, 100));
+    // Remove old services from previous versions
+    for (const name of ['Rainfall 48h', 'Rain Forecast 24h', 'Garden Temperature']) {
+      const old = this.accessory.getService(name);
+      if (old) {
+        this.accessory.removeService(old);
+        this.log.info(`Removed legacy sensor: ${name}`);
+      }
+    }
 
-    // Forecast next 24h as a HumiditySensor
-    this.forecastService = this.accessory.getService('Rain Forecast 24h')
-      || this.accessory.addService(this.platform.Service.HumiditySensor, 'Rain Forecast 24h', 'forecast24h');
-    this.forecastService.getCharacteristic(this.platform.Characteristic.CurrentRelativeHumidity)
-      .onGet(() => Math.min(this.forecastNext24h, 100));
+    // Migrate from OccupancySensor to ContactSensor if needed
+    const oldOccupancy = this.accessory.getService(this.platform.Service.OccupancySensor);
+    if (oldOccupancy) {
+      this.accessory.removeService(oldOccupancy);
+      this.log.info('Migrated Should Water from OccupancySensor to ContactSensor');
+    }
 
-    // Temperature
-    this.temperatureService = this.accessory.getService('Garden Temperature')
-      || this.accessory.addService(this.platform.Service.TemperatureSensor, 'Garden Temperature', 'gardenTemp');
-    this.temperatureService.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
-      .onGet(() => this.temperature);
-
-    // "Should Water" as OccupancySensor - detected = yes, water the plants
+    // "Should Water" as ContactSensor — open = water needed, closed = skip
     this.shouldWaterService = this.accessory.getService('Should Water')
-      || this.accessory.addService(this.platform.Service.OccupancySensor, 'Should Water', 'shouldWater');
-    this.shouldWaterService.getCharacteristic(this.platform.Characteristic.OccupancyDetected)
-      .onGet(() => this.shouldWater ? 1 : 0);
+      || this.accessory.addService(this.platform.Service.ContactSensor, 'Should Water', 'shouldWater');
+    this.shouldWaterService.getCharacteristic(this.platform.Characteristic.ContactSensorState)
+      .onGet(() => this.shouldWater
+        ? this.platform.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED  // open = water needed
+        : this.platform.Characteristic.ContactSensorState.CONTACT_DETECTED);     // closed = skip
+
+    // Restore water balance from context if available
+    if (this.accessory.context.waterBalance !== undefined) {
+      this.waterBalance = this.accessory.context.waterBalance;
+      this.lastBalanceUpdate = this.accessory.context.lastBalanceUpdate || null;
+      this.log.info(`Restored water balance: ${this.waterBalance.toFixed(1)}mm (last update: ${this.lastBalanceUpdate})`);
+    }
 
     this.startPolling();
   }
 
   private startPolling(): void {
     const intervalMinutes = this.config.pollInterval || 30;
-    this.log.info(`Weather sensor polling every ${intervalMinutes} minutes for ${this.config.latitude}, ${this.config.longitude}`);
+    this.log.info(`Weather polling every ${intervalMinutes}min for ${this.config.latitude}, ${this.config.longitude}`);
 
     this.fetchAndUpdate();
     this.pollTimer = setInterval(() => this.fetchAndUpdate(), intervalMinutes * 60 * 1000);
@@ -83,41 +87,130 @@ export class WeatherSensorAccessory {
   private async fetchAndUpdate(): Promise<void> {
     try {
       const weather = await this.fetchWeather();
-      this.rainfall48h = Math.round(weather.rainfall48h * 10) / 10;
-      this.forecastNext24h = Math.round(weather.forecastNext24h * 10) / 10;
-      this.temperature = Math.round(weather.temperature * 10) / 10;
+
+      // Update daily water balance (once per day)
+      this.updateWaterBalance(weather);
+
+      // Compute decision
+      const previousState = this.shouldWater;
       this.shouldWater = this.computeShouldWater(weather);
 
-      this.rainfall48hService.updateCharacteristic(
-        this.platform.Characteristic.CurrentRelativeHumidity,
-        Math.min(this.rainfall48h, 100),
-      );
-
-      this.forecastService.updateCharacteristic(
-        this.platform.Characteristic.CurrentRelativeHumidity,
-        Math.min(this.forecastNext24h, 100),
-      );
-
-      this.temperatureService.updateCharacteristic(
-        this.platform.Characteristic.CurrentTemperature,
-        this.temperature,
-      );
-
       this.shouldWaterService.updateCharacteristic(
-        this.platform.Characteristic.OccupancyDetected,
-        this.shouldWater ? 1 : 0,
+        this.platform.Characteristic.ContactSensorState,
+        this.shouldWater
+          ? this.platform.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED
+          : this.platform.Characteristic.ContactSensorState.CONTACT_DETECTED,
       );
 
+      // Persist balance to accessory context
+      this.accessory.context.waterBalance = this.waterBalance;
+      this.accessory.context.lastBalanceUpdate = this.lastBalanceUpdate;
+
+      // Log with decision reason
+      const reason = this.getDecisionReason(weather);
       this.log.info(
-        `Weather update: ${this.rainfall48h}mm (48h), ${this.forecastNext24h}mm (forecast), ` +
-        `${this.temperature}C, shouldWater=${this.shouldWater}`,
+        `Weather: balance=${this.waterBalance.toFixed(1)}mm, ` +
+        `rain24h=${weather.rainfall24h.toFixed(1)}mm, ET0=${weather.et0.toFixed(1)}mm, ` +
+        `forecast=${weather.forecastRain24h.toFixed(1)}mm, ` +
+        `temp=${weather.temperature.toFixed(0)}C, wind=${weather.windSpeed.toFixed(0)}km/h — ` +
+        `${reason}`,
       );
+
+      if (this.shouldWater !== previousState) {
+        this.log.info(`Should Water changed: ${previousState} → ${this.shouldWater}`);
+      }
     } catch (error) {
       this.log.error(
         'Weather fetch failed:',
         error instanceof Error ? error.message : String(error),
       );
     }
+  }
+
+  private updateWaterBalance(weather: WeatherData): void {
+    const today = new Date().toISOString().split('T')[0];
+
+    if (this.lastBalanceUpdate === today) {
+      return; // Already updated today
+    }
+
+    // Daily balance: rain adds moisture, ET removes it
+    this.waterBalance += weather.rainfall24h;
+    this.waterBalance -= weather.et0;
+
+    // Cap at 0 — don't accumulate surplus beyond saturation
+    this.waterBalance = Math.min(this.waterBalance, 0);
+
+    // Floor at -25 — don't let deficit grow beyond what watering can reasonably fix
+    this.waterBalance = Math.max(this.waterBalance, -25);
+
+    this.lastBalanceUpdate = today;
+    this.log.info(`Water balance updated: +${weather.rainfall24h.toFixed(1)}mm rain, -${weather.et0.toFixed(1)}mm ET = ${this.waterBalance.toFixed(1)}mm`);
+  }
+
+  private computeShouldWater(weather: WeatherData): boolean {
+    // Winter: off entirely (Dec-Feb)
+    if (this.config.seasonalAdjust !== false) {
+      const month = new Date().getMonth();
+      if (month >= 11 || month <= 1) {
+        return false;
+      }
+    }
+
+    // Frost protection: skip if below 2C
+    if (weather.temperature < 2) {
+      return false;
+    }
+
+    // Wind check: skip if too windy (default 30 km/h)
+    const windLimit = this.config.windSkipThreshold ?? 30;
+    if (weather.windSpeed > windLimit) {
+      return false;
+    }
+
+    // Forecast: skip if significant rain coming (default 8mm)
+    const forecastSkip = this.config.forecastSkipThreshold ?? 8;
+    if (weather.forecastRain24h >= forecastSkip) {
+      return false;
+    }
+
+    // Water balance: water if deficit exceeds threshold (default -2mm)
+    const deficitThreshold = this.config.deficitThreshold ?? -2;
+    if (this.waterBalance > deficitThreshold) {
+      return false; // Soil has enough moisture
+    }
+
+    return true;
+  }
+
+  private getDecisionReason(weather: WeatherData): string {
+    if (this.config.seasonalAdjust !== false) {
+      const month = new Date().getMonth();
+      if (month >= 11 || month <= 1) {
+        return 'SKIP: winter (Dec-Feb)';
+      }
+    }
+
+    if (weather.temperature < 2) {
+      return `SKIP: frost protection (${weather.temperature.toFixed(0)}C)`;
+    }
+
+    const windLimit = this.config.windSkipThreshold ?? 30;
+    if (weather.windSpeed > windLimit) {
+      return `SKIP: too windy (${weather.windSpeed.toFixed(0)}km/h, limit ${windLimit})`;
+    }
+
+    const forecastSkip = this.config.forecastSkipThreshold ?? 8;
+    if (weather.forecastRain24h >= forecastSkip) {
+      return `SKIP: rain forecast (${weather.forecastRain24h.toFixed(1)}mm coming)`;
+    }
+
+    const deficitThreshold = this.config.deficitThreshold ?? -2;
+    if (this.waterBalance > deficitThreshold) {
+      return `SKIP: soil OK (balance ${this.waterBalance.toFixed(1)}mm, threshold ${deficitThreshold}mm)`;
+    }
+
+    return `WATER: deficit ${this.waterBalance.toFixed(1)}mm`;
   }
 
   private async fetchWeather(): Promise<WeatherData> {
@@ -127,8 +220,9 @@ export class WeatherSensorAccessory {
       params: {
         latitude,
         longitude,
-        hourly: 'precipitation,temperature_2m',
-        past_days: 2,
+        daily: 'precipitation_sum,et0_fao_evapotranspiration,temperature_2m_max',
+        hourly: 'precipitation,temperature_2m,wind_speed_10m',
+        past_days: 1,
         forecast_days: 1,
         timezone: 'auto',
       },
@@ -136,56 +230,46 @@ export class WeatherSensorAccessory {
     });
 
     const data = response.data;
+
+    // Daily values — yesterday's rain and ET
+    const dailyPrecip: number[] = data.daily?.precipitation_sum || [];
+    const dailyET: number[] = data.daily?.et0_fao_evapotranspiration || [];
+    const dailyMaxTemp: number[] = data.daily?.temperature_2m_max || [];
+
+    const rainfall24h = dailyPrecip.length > 0 ? dailyPrecip[0] : 0;
+    const et0 = dailyET.length > 0 ? dailyET[0] : 3; // Default 3mm/day if unavailable
+    const maxTempToday = dailyMaxTemp.length > 1 ? dailyMaxTemp[1] : dailyMaxTemp[0] || 20;
+
+    // Hourly values — current conditions + forecast
     const hourlyPrecip: number[] = data.hourly?.precipitation || [];
     const hourlyTimes: string[] = data.hourly?.time || [];
     const hourlyTemps: number[] = data.hourly?.temperature_2m || [];
+    const hourlyWind: number[] = data.hourly?.wind_speed_10m || [];
 
     const now = new Date();
-    const cutoff48h = new Date(now.getTime() - 48 * 60 * 60 * 1000);
     const cutoff24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    let rainfall48h = 0;
-    let forecastNext24h = 0;
-
+    // Forecast rain (next 24h)
+    let forecastRain24h = 0;
     for (let i = 0; i < hourlyTimes.length; i++) {
       const time = new Date(hourlyTimes[i]);
-      const precip = hourlyPrecip[i] || 0;
-
-      if (time >= cutoff48h && time <= now) {
-        rainfall48h += precip;
-      }
       if (time > now && time <= cutoff24h) {
-        forecastNext24h += precip;
+        forecastRain24h += hourlyPrecip[i] || 0;
       }
     }
 
-    const temperature = hourlyTemps.length > 0
-      ? hourlyTemps[hourlyTemps.length - 1]
-      : 15;
-
-    return { rainfall48h, forecastNext24h, temperature };
-  }
-
-  private computeShouldWater(weather: WeatherData): boolean {
-    const skipThreshold = this.config.rainSkipThreshold ?? 10;
-    const forecastSkip = this.config.forecastSkipThreshold ?? 5;
-
-    // Winter: don't water
-    if (this.config.seasonalAdjust !== false) {
-      const month = new Date().getMonth();
-      if (month >= 11 || month <= 1) {
-        return false;
+    // Current temperature and wind (latest hourly reading before now)
+    let temperature = 15;
+    let windSpeed = 0;
+    for (let i = hourlyTimes.length - 1; i >= 0; i--) {
+      const time = new Date(hourlyTimes[i]);
+      if (time <= now) {
+        temperature = hourlyTemps[i] ?? 15;
+        windSpeed = hourlyWind[i] ?? 0;
+        break;
       }
     }
 
-    if (weather.forecastNext24h >= forecastSkip) {
-      return false;
-    }
-
-    if (weather.rainfall48h >= skipThreshold) {
-      return false;
-    }
-
-    return true;
+    return { rainfall24h, et0, forecastRain24h, temperature, windSpeed, maxTempToday };
   }
 }

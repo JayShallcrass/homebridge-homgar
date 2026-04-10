@@ -3,9 +3,9 @@ export interface WeatherConfig {
   latitude: number;
   longitude: number;
   pollInterval?: number;
-  rainSkipThreshold?: number;
-  rainReduceThreshold?: number;
   forecastSkipThreshold?: number;
+  windSkipThreshold?: number;
+  deficitThreshold?: number;
   seasonalAdjust?: boolean;
 }
 

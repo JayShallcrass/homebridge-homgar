@@ -47,13 +47,13 @@
         "description": "Default duration when starting watering from HomeKit (10 minutes default)"
       },
       "weather": {
-        "title": "Weather Sensors",
+        "title": "Smart Irrigation",
         "type": "object",
         "expandable": true,
-        "description": "Expose weather data as HomeKit sensors using Open-Meteo (free, no API key needed). Use the 'Should Water' sensor to trigger automations.",
+        "description": "Weather-aware 'Should Water' sensor using Open-Meteo (free, no API key). Tracks water balance using rainfall and evapotranspiration. Use in HomeKit automations to control your valves.",
         "properties": {
           "enabled": {
-            "title": "Enable Weather Sensors",
+            "title": "Enable Smart Irrigation",
             "type": "boolean",
             "default": false
           },
@@ -72,25 +72,32 @@
             "type": "integer",
             "default": 30,
             "minimum": 10,
-            "description": "How often to fetch weather data"
+            "description": "How often to check weather and update the Should Water sensor"
           },
-          "rainSkipThreshold": {
-            "title": "Rain Skip Threshold (mm)",
+          "deficitThreshold": {
+            "title": "Water Deficit Threshold (mm)",
             "type": "number",
-            "default": 10,
-            "description": "'Should Water' turns off if this much rain fell in the last 48 hours"
+            "default": -2,
+            "maximum": 0,
+            "description": "Should Water activates when soil water balance drops below this value. More negative = drier before watering triggers."
           },
           "forecastSkipThreshold": {
             "title": "Forecast Skip Threshold (mm)",
             "type": "number",
-            "default": 5,
-            "description": "'Should Water' turns off if this much rain is forecast in the next 24 hours"
+            "default": 8,
+            "description": "Skip watering if this much rain is forecast in the next 24 hours"
+          },
+          "windSkipThreshold": {
+            "title": "Wind Skip Threshold (km/h)",
+            "type": "number",
+            "default": 30,
+            "description": "Skip watering if wind speed exceeds this value (drift and evaporation)"
           },
           "seasonalAdjust": {
             "title": "Seasonal Adjustment",
             "type": "boolean",
             "default": true,
-            "description": "'Should Water' turns off automatically in winter (Dec-Feb)"
+            "description": "Automatically skip watering in winter (Dec-Feb) and protect against frost (<2C)"
           }
         }
       }
