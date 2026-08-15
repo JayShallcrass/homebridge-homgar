@@ -11,6 +11,9 @@ import { HomGarSubDevice, HomGarHub } from '../api/types';
 import { DEFAULT_WATERING_DURATION } from '../settings';
 
 export class WaterTimerAccessory {
+  /** Consecutive failed polls before the log escalates from debug to error. */
+  private static readonly FAILURES_BEFORE_ALERT = 3;
+
   private valveService: Service;
 
   private isActive = false;
@@ -19,6 +22,7 @@ export class WaterTimerAccessory {
   private setDuration: number;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private countdownTimer: ReturnType<typeof setInterval> | null = null;
+  private consecutiveFailures = 0;
 
   constructor(
     private readonly platform: HomGarPlatform,
@@ -148,11 +152,37 @@ export class WaterTimerAccessory {
       if (this.isInUse) {
         this.log.debug(`${this.device.name}: Active, ${this.remainingDuration}s remaining`);
       }
+
+      if (this.consecutiveFailures > 0) {
+        this.log.info(
+          `${this.device.name}: Polling recovered after ${this.consecutiveFailures} `
+          + `consecutive failure${this.consecutiveFailures === 1 ? '' : 's'}`,
+        );
+        this.consecutiveFailures = 0;
+      }
     } catch (error) {
-      this.log.error(
-        `Failed to poll ${this.device.name}:`,
-        error instanceof Error ? error.message : String(error),
-      );
+      this.consecutiveFailures++;
+      const message = error instanceof Error ? error.message : String(error);
+
+      // The client already retried transient faults. A lone failure after that
+      // is still usually the HomGar cloud being flaky, so only escalate once it
+      // is persistent - otherwise every blip produced a red error in the log.
+      if (this.consecutiveFailures < WaterTimerAccessory.FAILURES_BEFORE_ALERT) {
+        this.log.debug(
+          `${this.device.name}: Poll failed `
+          + `(${this.consecutiveFailures}/${WaterTimerAccessory.FAILURES_BEFORE_ALERT}): ${message}`,
+        );
+      } else if (this.consecutiveFailures === WaterTimerAccessory.FAILURES_BEFORE_ALERT) {
+        this.log.error(
+          `Failed to poll ${this.device.name} `
+          + `${this.consecutiveFailures} times in a row: ${message}`,
+        );
+      } else {
+        // Already alerted; stay quiet until it recovers rather than repeating.
+        this.log.debug(
+          `${this.device.name}: Still failing (${this.consecutiveFailures}): ${message}`,
+        );
+      }
     }
   }
 

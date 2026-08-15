@@ -13,7 +13,22 @@ import {
   ValveZoneData,
 } from './types';
 
+/** Network-level failures worth retrying. Everything else is a real error. */
+const TRANSIENT_CODES = new Set([
+  'ECONNABORTED', // axios timeout
+  'ETIMEDOUT',
+  'ENOTFOUND', // DNS miss on regionN.homgarus.com
+  'EAI_AGAIN', // transient DNS failure
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EPIPE',
+]);
+
 export class HomGarApiClient {
+  private static readonly RETRY_ATTEMPTS = 3;
+  private static readonly RETRY_BASE_MS = 500;
+
   private http: AxiosInstance;
   private auth: AuthTokens | null = null;
   private email: string;
@@ -78,40 +93,90 @@ export class HomGarApiClient {
     }
   }
 
-  private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
-    await this.ensureAuthenticated();
+  /**
+   * True only for network-level faults. An API error (`code !== 0`) is a real
+   * answer from HomGar and must not be retried, or a rejected command would be
+   * sent three times.
+   */
+  static isTransient(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) {
+      return false;
+    }
+    if (error.response) {
+      return error.response.status >= 500 || error.response.status === 429;
+    }
+    return error.code !== undefined && TRANSIENT_CODES.has(error.code);
+  }
 
-    const response = await this.http.get(path, {
-      params,
-      headers: { auth: this.auth!.token },
-    });
+  /**
+   * Retry transient network failures with exponential backoff and jitter.
+   * The HomGar cloud drops roughly 4% of polls; without this every blip
+   * surfaced as an error and left the accessory showing stale state.
+   */
+  private async withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
 
-    const data = response.data;
-    if (data.code !== 0) {
-      throw new Error(`API error on ${path}: ${data.msg || 'unknown'} (code ${data.code})`);
+    for (let attempt = 1; attempt <= HomGarApiClient.RETRY_ATTEMPTS; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+
+        if (!HomGarApiClient.isTransient(error) || attempt === HomGarApiClient.RETRY_ATTEMPTS) {
+          throw error;
+        }
+
+        const backoff = HomGarApiClient.RETRY_BASE_MS * 2 ** (attempt - 1);
+        const delay = backoff + Math.floor(Math.random() * 250);
+        this.log.debug(
+          `${label} failed (attempt ${attempt}/${HomGarApiClient.RETRY_ATTEMPTS}), `
+          + `retrying in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     }
 
-    return data.data;
+    throw lastError;
+  }
+
+  private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
+    return this.withRetry(`GET ${path}`, async () => {
+      await this.ensureAuthenticated();
+
+      const response = await this.http.get(path, {
+        params,
+        headers: { auth: this.auth!.token },
+      });
+
+      const data = response.data;
+      if (data.code !== 0) {
+        throw new Error(`API error on ${path}: ${data.msg || 'unknown'} (code ${data.code})`);
+      }
+
+      return data.data;
+    });
   }
 
   private async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    await this.ensureAuthenticated();
+    return this.withRetry(`POST ${path}`, async () => {
+      await this.ensureAuthenticated();
 
-    const response = await this.http.post(path, body, {
-      headers: { auth: this.auth!.token },
-    });
+      const response = await this.http.post(path, body, {
+        headers: { auth: this.auth!.token },
+      });
 
-    const data = response.data;
-    if (data.code !== 0) {
-      // Code 4 = device already in requested state, treat as non-fatal
-      if (data.code === 4) {
-        this.log.debug(`API returned code 4 (already in state) for ${path}`);
-        return data.data;
+      const data = response.data;
+      if (data.code !== 0) {
+        // Code 4 = device already in requested state, treat as non-fatal
+        if (data.code === 4) {
+          this.log.debug(`API returned code 4 (already in state) for ${path}`);
+          return data.data;
+        }
+        throw new Error(`API error on ${path}: ${data.msg || 'unknown'} (code ${data.code})`);
       }
-      throw new Error(`API error on ${path}: ${data.msg || 'unknown'} (code ${data.code})`);
-    }
 
-    return data.data;
+      return data.data;
+    });
   }
 
   async getHomes(): Promise<HomGarHome[]> {
